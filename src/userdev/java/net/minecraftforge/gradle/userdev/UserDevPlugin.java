@@ -20,6 +20,7 @@
 
 package net.minecraftforge.gradle.userdev;
 
+import com.google.common.collect.ImmutableList;
 import net.minecraftforge.gradle.common.tasks.ApplyMappings;
 import net.minecraftforge.gradle.common.tasks.ApplyRangeMap;
 import net.minecraftforge.gradle.common.tasks.DownloadAssets;
@@ -42,11 +43,13 @@ import net.minecraftforge.gradle.userdev.tasks.RenameJarInPlace;
 import net.minecraftforge.gradle.userdev.util.DeobfuscatingRepo;
 import net.minecraftforge.gradle.userdev.util.Deobfuscator;
 import net.minecraftforge.gradle.userdev.util.DependencyRemapper;
+import net.minecraftforge.gradle.userdev.util.MappedConfigurationEntry;
 import net.minecraftforge.srgutils.IMappingFile;
 
 import org.apache.commons.lang3.StringUtils;
 import org.gradle.api.DefaultTask;
 import org.gradle.api.NamedDomainObjectContainer;
+import org.gradle.api.NamedDomainObjectProvider;
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
 import org.gradle.api.artifacts.Configuration;
@@ -71,6 +74,7 @@ import org.gradle.language.base.plugins.LifecycleBasePlugin;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
@@ -97,8 +101,32 @@ public class UserDevPlugin implements Plugin<Project> {
                 .configure(c -> c.extendsFrom(minecraft));
 
         // Let gradle handle the downloading by giving it a configuration to dl. We'll focus on applying mappings to it.
+        final List<MappedConfigurationEntry> mappedConfigurationEntries = ImmutableList.of(
+                new MappedConfigurationEntry("deobfImplementation", JavaPlugin.IMPLEMENTATION_CONFIGURATION_NAME),
+                new MappedConfigurationEntry("deobfRuntimeOnly", JavaPlugin.RUNTIME_ONLY_CONFIGURATION_NAME),
+                new MappedConfigurationEntry("deobfCompileOnly", JavaPlugin.COMPILE_ONLY_CONFIGURATION_NAME)
+        );
+
         final Configuration internalObfConfiguration = project.getConfigurations().create(OBF);
         internalObfConfiguration.setDescription("Generated scope for obfuscated dependencies");
+
+        // setup named deobf configurations
+        for (MappedConfigurationEntry entry : mappedConfigurationEntries) {
+            Configuration sourceConfiguration = project.getConfigurations().create(entry.getSourceConfigurationName(), c -> {
+                c.setDescription("Configuration to hold obfuscated dependencies for " + entry.getTargetConfigurationName());
+                c.setCanBeResolved(false);
+            });
+
+            NamedDomainObjectProvider<Configuration> mappedConfiguration = project.getConfigurations().register(entry.getMappedConfigurationName(), c -> {
+                c.setDescription("Configuration to hold deobfuscated dependencies for " + entry.getTargetConfigurationName());
+                c.setCanBeResolved(false);
+                c.setTransitive(false);
+            });
+
+            project.getConfigurations().named(entry.getTargetConfigurationName(), c -> c.extendsFrom(mappedConfiguration.get()));
+
+            internalObfConfiguration.extendsFrom(sourceConfiguration);
+        }
 
         // Create extension for dependency remapping
         // Can't create at top-level or put in `minecraft` ext due to configuration name conflict
@@ -234,8 +262,15 @@ public class UserDevPlugin implements Plugin<Project> {
                 });
             });
 
-            if (!internalObfConfiguration.getDependencies().isEmpty()) {
-                deobfrepo = new DeobfuscatingRepo(project, internalObfConfiguration, deobfuscator);
+            for (MappedConfigurationEntry entry : mappedConfigurationEntries) {
+                project.getConfigurations()
+                        .getByName(entry.getSourceConfigurationName())
+                        .getDependencies()
+                        .forEach(dependency -> project.getDependencies().add(entry.getMappedConfigurationName(), remapper.remap(dependency)));
+            }
+
+            if (!internalObfConfiguration.getAllDependencies().isEmpty()) {
+                deobfrepo = new DeobfuscatingRepo(project, internalObfConfiguration.copyRecursive(), deobfuscator);
                 if (deobfrepo.getResolvedOrigin() == null) {
                     project.getLogger().error("DeobfRepo attempted to resolve an origin repo early but failed, this may cause issues with some IDEs");
                 }
